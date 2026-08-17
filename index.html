@@ -254,12 +254,13 @@
             position:relative; top:-42px; text-align:center;
             font-size:1.1rem; font-weight:900; color:var(--primary-dark);
         }
-        .run-btns { display:flex; gap:10px; margin-top:6px; }
+        .run-btns { display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:6px; }
         .run-btn {
-            flex:1; padding:11px; border-radius:12px; border:none;
+            padding:11px 6px; border-radius:12px; border:none;
             font-weight:700; font-size:0.9rem; cursor:pointer;
         }
         .run-btn-pause { background:var(--primary-light); color:var(--primary-dark); }
+        .run-btn-next { background:var(--primary); color:#fff; }
         .run-btn-stop  { background:#fee2e2; color:#b91c1c; }
 
         /* ===== SCREEN 4: RESULT ===== */
@@ -493,8 +494,10 @@
             </div>
         </div>
         <div class="run-btns">
-            <button class="run-btn run-btn-pause" id="pause-btn" onclick="togglePause()">⏸ 暂停</button>
-            <button class="run-btn run-btn-stop"  onclick="stopDictation()">⏹ 结束</button>
+            <button class="run-btn run-btn-pause" id="pause-btn" onclick="togglePause()">暂停</button>
+            <button class="run-btn run-btn-pause" onclick="replayCurrentWord()">重听</button>
+            <button class="run-btn run-btn-next" onclick="nextWord()">下一个</button>
+            <button class="run-btn run-btn-stop" onclick="stopDictation()">结束</button>
         </div>
     </div>
 </div>
@@ -677,6 +680,7 @@ let sessionIndex = 0;
 let isRunning = false;
 let isPaused = false;
 let speechInterrupted = false;
+let skipCurrentWord = false;
 let isReviewMode = false;
 let isImmediateReviewMode = false;
 let wrongInSession = [];
@@ -694,11 +698,9 @@ function loadVoices() {
     try {
         const voices = synth.getVoices();
         cnVoice =
-            voices.find(v => v.lang === 'zh-CN' && v.name.includes('Google')) ||
-            voices.find(v => v.lang === 'zh-CN' && v.name.includes('Ting')) ||
-            voices.find(v => v.lang === 'zh-CN') ||
-            voices.find(v => v.lang === 'zh-HK') ||
-            voices.find(v => v.lang.startsWith('zh'));
+            voices.find(v => /^zh[-_]CN$/i.test(v.lang)) ||
+            voices.find(v => /^zh[-_]/i.test(v.lang)) ||
+            null;
     } catch(e) {}
 }
 try { loadVoices(); } catch(e) {}
@@ -898,19 +900,14 @@ function updatePreview() {
 // ===================================================================
 function unlockAudio() {
     if (!synth) return;
+    loadVoices();
     try {
         const u = new SpeechSynthesisUtterance('');
+        u.lang = 'zh-CN';
+        if (cnVoice) u.voice = cnVoice;
         synth.speak(u);
         synth.cancel();
     } catch(e) {}
-    if (!cnVoice) {
-        try {
-            const voices = synth.getVoices();
-            cnVoice = voices.find(v => v.lang === 'zh-CN') ||
-                      voices.find(v => v.lang.startsWith('zh')) ||
-                      voices[0] || null;
-        } catch(e) {}
-    }
 }
 
 function startDictation() {
@@ -955,6 +952,8 @@ function startReviewDictation() {
 
 async function runDictation() {
     isRunning = true; isPaused = false;
+    skipCurrentWord = false;
+    document.getElementById('pause-btn').textContent = '暂停';
     sessionIndex = 0;
     wrongInSession = [];
 
@@ -966,6 +965,8 @@ async function runDictation() {
     if (synth) {
         synth.cancel();
         const warmUp = new SpeechSynthesisUtterance('');
+        warmUp.lang = 'zh-CN';
+        if (cnVoice) warmUp.voice = cnVoice;
         synth.speak(warmUp);
     }
 
@@ -978,6 +979,7 @@ async function runDictation() {
     wordEl.textContent = '';
 
     while (sessionIndex < total && isRunning) {
+        skipCurrentWord = false;
         updateRunProgress();
         await waitWhilePaused();
         if (!isRunning) break;
@@ -996,12 +998,14 @@ async function runDictation() {
         const repeat = parseInt(document.getElementById('set-repeat').value);
         for (let r = 0; r < repeat; r++) {
             await waitWhilePaused();
-            if (!isRunning) break;
+            if (!isRunning || skipCurrentWord) break;
             await speakWhileActive(word);
+            if (skipCurrentWord) break;
             if (r < repeat - 1) await sleep(1000);
         }
 
         if (!isRunning) break;
+        if (skipCurrentWord) { sessionIndex++; continue; }
 
         wordEl.style.color = '#ede9fe';
         statusEl.textContent = '✍️ 书写中...';
@@ -1027,7 +1031,7 @@ async function runCountdown(seconds) {
 
     const start = Date.now();let pausedTotal=0;
     while (true) {
-        if (!isRunning) break;
+        if (!isRunning || skipCurrentWord) break;
         if(isPaused){const pausedAt=Date.now();await waitWhilePaused();pausedTotal+=Date.now()-pausedAt;}
         const elapsed = Date.now()-start-pausedTotal;
         const remain  = Math.max(0, total_ms - elapsed);
@@ -1051,17 +1055,27 @@ async function waitWhilePaused() {
     while (isPaused && isRunning) await sleep(200);
 }
 
-async function speakWhileActive(text){do{await waitWhilePaused();if(!isRunning)return;speechInterrupted=false;await speakWord(text);}while(speechInterrupted&&isRunning);}
+async function speakWhileActive(text){do{await waitWhilePaused();if(!isRunning||skipCurrentWord)return;speechInterrupted=false;await speakWord(text);}while(speechInterrupted&&isRunning&&!skipCurrentWord);}
 function togglePause() {
     isPaused = !isPaused;
     const btn = document.getElementById('pause-btn');
     if (isPaused) {speechInterrupted=true;if(currentUtterance&&currentUtterance.onerror)currentUtterance.onerror();
         if (synth) synth.cancel();
-        btn.textContent = '▶ 继续';
+        btn.textContent = '继续';
         document.getElementById('run-status').textContent = '⏸ 已暂停';
     } else {
-        btn.textContent = '⏸ 暂停';
+        btn.textContent = '暂停';
     }
+}
+function replayCurrentWord() {
+    if (!isRunning || sessionIndex >= sessionWords.length) return;
+    speakWord(sessionWords[sessionIndex]);
+}
+function nextWord() {
+    if (!isRunning || sessionIndex >= sessionWords.length) return;
+    skipCurrentWord = true;
+    if (currentUtterance && currentUtterance.onerror) currentUtterance.onerror();
+    if (synth) synth.cancel();
 }
 function stopDictation() {
     if (confirm('确定要提前结束吗？')) {
@@ -1075,14 +1089,7 @@ function speakWord(text) {
     return new Promise(resolve => {
         if (!synth) { setTimeout(resolve, 800); return; }
 
-        if (!cnVoice) {
-            try {
-                const voices = synth.getVoices();
-                cnVoice = voices.find(v => v.lang === 'zh-CN') ||
-                          voices.find(v => v.lang.startsWith('zh')) ||
-                          voices[0] || null;
-            } catch(e) {}
-        }
+        if (!cnVoice) loadVoices();
 
         synth.cancel();
         const u = new SpeechSynthesisUtterance(text);
